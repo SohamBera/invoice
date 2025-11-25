@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Invoice Extractor</title>
+</head>
+<body>
+<h2>Upload PDF</h2>
+<form action="/extract" method="post" enctype="multipart/form-data">
+    <input type="file" name="file" accept=".pdf" required>
+    <input type="submit" value="Extract">
+</form>
+</body>
+</html>
