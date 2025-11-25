@@ -1,79 +1,113 @@
+# chat.py
+"""
+Invoice OCR + GST extractor for scanned PDFs (Azure-ready)
+
+Mode:
+1. Convert PDF pages to images
+2. Run OCR using pytesseract
+3. Extract GST, Invoice Number, Seller State & Code
+"""
+
 import os
 import re
 import json
 from PIL import Image
-import fitz
+import fitz  # PyMuPDF
 import pytesseract
 
+# Azure App Service paths
 PDF_FOLDER = "./pdfs"
+os.makedirs(PDF_FOLDER, exist_ok=True)
 
-state_codes = {
-    "17": "Meghalaya",
-    "27": "Maharashtra",
-    "19": "West Bengal",
-    # ... add all states as needed
+# GST/State mapping
+STATE_CODE_MAPPING = {
+    "01": "JAMMU & KASHMIR",
+    "02": "HIMACHAL PRADESH",
+    "03": "PUNJAB",
+    "04": "CHANDIGARH",
+    "05": "UTTARAKHAND",
+    "06": "HARYANA",
+    "07": "DELHI",
+    "08": "RAJASTHAN",
+    "09": "UTTAR PRADESH",
+    "10": "BIHAR",
+    "11": "SIKKIM",
+    "12": "ARUNACHAL PRADESH",
+    "13": "NAGALAND",
+    "14": "MANIPUR",
+    "15": "MIZORAM",
+    "16": "TRIPURA",
+    "17": "MEGHALAYA",
+    "18": "ASSAM",
+    "19": "WEST BENGAL",
+    "20": "JHARKHAND",
+    "21": "ODISHA",
+    "22": "CHATTISGARH",
+    "23": "MADHYA PRADESH",
+    "24": "GUJARAT",
+    "25": "DAMAN AND DIU",
+    "26": "DADRA AND NAGAR HAVELI",
+    "27": "MAHARASHTRA",
+    "28": "ANDHRA PRADESH",
+    "29": "KARNATAKA",
+    "30": "GOA",
+    "31": "LAKSHADWEEP",
+    "32": "KERALA",
+    "33": "TAMIL NADU",
+    "34": "PUDUCHERRY",
+    "35": "ANDAMAN AND NICOBAR ISLANDS",
+    "36": "TELANGANA",
+    "37": "ANDHRA PRADESH NEW"
 }
 
-def ocr_image(img: Image.Image) -> str:
-    return pytesseract.image_to_string(img)
+# Regex patterns
+INVOICE_REGEX = r"(Invoice\s*No\.?\s*[:\-]?\s*)(\S+)"
+GST_REGEX = r"\b(\d{2}[A-Z]{5}\d{4}[A-Z]{1}[A-Z\d]{1}[Z]{1}[A-Z\d]{1})\b"
 
-def extract_text_from_pdf(pdf_path: str) -> str:
+def ocr_pdf(pdf_path):
+    """Convert PDF pages to images and extract text using pytesseract"""
     doc = fitz.open(pdf_path)
     full_text = ""
     for page in doc:
-        text = page.get_text()
-        if not text.strip():
-            pix = page.get_pixmap(dpi=300)
-            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-            text = ocr_image(img)
-        full_text += "\n" + text
+        pix = page.get_pixmap(dpi=300)
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        text = pytesseract.image_to_string(img)
+        full_text += text + "\n"
     return full_text
 
-def clean_gst(text: str) -> str:
-    """Fix common OCR issues in GST"""
-    if not text:
-        return ""
-    text = text.replace(" ", "").upper()
-    text = text.replace("O", "0").replace("I", "1")
-    return text
+def extract_fields(text):
+    """Extract invoice fields from OCR text"""
+    invoice_match = re.search(INVOICE_REGEX, text, re.IGNORECASE)
+    invoice_number = invoice_match.group(2) if invoice_match else ""
 
-def extract_invoice_number(text: str) -> str:
-    match = re.search(r"Invoice\s*(No|Number)?[:\s]*([A-Z0-9\-/]+)", text, re.IGNORECASE)
-    return match.group(2).strip() if match else ""
+    gst_matches = re.findall(GST_REGEX, text)
+    buyer_gst = gst_matches[0] if len(gst_matches) >= 1 else ""
+    seller_gst = gst_matches[1] if len(gst_matches) >= 2 else ""
 
-def extract_gst_numbers(text: str) -> list:
-    text = text.replace(" ", "").upper()
-    gst_matches = re.findall(r"\d{2}[A-Z0-9]{5}\d{4}[A-Z0-9]{1}Z[A-Z0-9]{1}", text)
-    gst_matches = [clean_gst(g) for g in gst_matches]
-    return gst_matches
+    seller_state_code = seller_gst[:2] if seller_gst else ""
+    seller_state = STATE_CODE_MAPPING.get(seller_state_code, "")
 
-def extract_state_code_from_gst(gst: str) -> str:
-    return gst[:2] if gst else ""
-
-def process_pdf(pdf_path: str) -> dict:
-    text = extract_text_from_pdf(pdf_path)
-    invoice_number = extract_invoice_number(text) or ""
-    gst_numbers = extract_gst_numbers(text)
-
-    seller_gst = gst_numbers[0] if gst_numbers else ""
-    buyer_gst = gst_numbers[1] if len(gst_numbers) > 1 else ""
-
-    seller_state_code = extract_state_code_from_gst(seller_gst)
-    seller_state = state_codes.get(seller_state_code, "")
-
-    data = {
+    return {
         "Invoice_Number": invoice_number,
-        "Seller_GST": seller_gst,
         "Buyer_GST": buyer_gst,
-        "Seller_State_Code": seller_state_code,
-        "Seller_State": seller_state
+        "Seller_GST": seller_gst,
+        "Seller_State": seller_state,
+        "Seller_State_Code": seller_state_code
     }
-    return {"data": data, "status": "success"}
+
+def process_pdfs(pdf_folder=PDF_FOLDER):
+    """Process all PDFs in folder and print JSON output"""
+    result = []
+    for file_name in os.listdir(pdf_folder):
+        if file_name.lower().endswith(".pdf"):
+            pdf_path = os.path.join(pdf_folder, file_name)
+            print(f"Processing: {file_name}")
+            text = ocr_pdf(pdf_path)
+            fields = extract_fields(text)
+            result.append({"file": file_name, "data": fields, "status": "success"})
+    return result
 
 if __name__ == "__main__":
-    pdf_files = [f for f in os.listdir(PDF_FOLDER) if f.lower().endswith(".pdf")]
-    results = []
-    for pdf_file in pdf_files:
-        result = process_pdf(os.path.join(PDF_FOLDER, pdf_file))
-        results.append(result)
-    print(json.dumps(results, indent=2))
+    import json
+    output = process_pdfs()
+    print(json.dumps(output, indent=4))
