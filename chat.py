@@ -1,142 +1,142 @@
 # chat.py
 """
-Azure-ready Invoice OCR + GST extractor
-- Auto-starts in App Service SSH or console
-- Debug messages for every step
-- Process all PDFs in /home/site/wwwroot/pdfs
-- Save output as JSON
+Invoice OCR + GST extractor (single-file)
+- Works for scanned and text PDFs
+- Flexible regex for GST and invoice numbers
+- Maps state codes to state names
 """
 
 import os
 import re
 import json
-import time
-from pathlib import Path
-
+from PIL import Image
 import fitz  # PyMuPDF
-from PIL import Image, ImageOps, ImageFilter
 import pytesseract
 
-# -----------------------------
-# CONFIG
-# -----------------------------
-PDF_FOLDER = "/home/site/wwwroot/pdfs"   # folder containing PDFs
-OUTPUT_FOLDER = "/home/site/wwwroot/output"  # folder to save JSON results
+# -------------------------------
+# Config
+# -------------------------------
+PDF_FOLDER = "./pdfs"  # folder containing PDF files
 
-os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+state_codes = {
+    "01": "Jammu & Kashmir",
+    "02": "Himachal Pradesh",
+    "03": "Punjab",
+    "04": "Chandigarh",
+    "05": "Uttarakhand",
+    "06": "Haryana",
+    "07": "Delhi",
+    "08": "Rajasthan",
+    "09": "Uttar Pradesh",
+    "10": "Bihar",
+    "11": "Sikkim",
+    "12": "Arunachal Pradesh",
+    "13": "Nagaland",
+    "14": "Manipur",
+    "15": "Mizoram",
+    "16": "Tripura",
+    "17": "Meghalaya",
+    "18": "Assam",
+    "19": "West Bengal",
+    "20": "Jharkhand",
+    "21": "Odisha",
+    "22": "Chhattisgarh",
+    "23": "Madhya Pradesh",
+    "24": "Gujarat",
+    "25": "Daman & Diu",
+    "26": "Maharashtra",
+    "27": "Andhra Pradesh (Old)",
+    "28": "Karnataka",
+    "29": "Goa",
+    "30": "Lakshadweep",
+    "31": "Kerala",
+    "32": "Tamil Nadu",
+    "33": "Puducherry",
+    "34": "Telangana",
+    "35": "Andaman & Nicobar",
+    "36": "Delhi",
+    "37": "Ladakh"
+}
 
-# -----------------------------
-# HELPER FUNCTIONS
-# -----------------------------
-
+# -------------------------------
+# OCR helper
+# -------------------------------
 def ocr_image(img: Image.Image) -> str:
-    """
-    Apply OCR to a PIL image and return text
-    """
-    gray = ImageOps.grayscale(img)
-    gray = gray.filter(ImageFilter.MedianFilter())
-    text = pytesseract.image_to_string(gray)
+    """Extract text from PIL Image using pytesseract"""
+    text = pytesseract.image_to_string(img)
     return text
 
-def extract_invoice_data(text: str) -> dict:
-    """
-    Extract invoice-related data using regex
-    """
-    data = {
-        "Invoice_Number": "",
-        "Buyer_GST": "",
-        "Seller_GST": "",
-        "Seller_State": "",
-        "Seller_State_Code": ""
-    }
+# -------------------------------
+# PDF text extraction
+# -------------------------------
+def extract_text_from_pdf(pdf_path: str) -> str:
+    """Extracts text from PDF using PyMuPDF and OCR fallback"""
+    doc = fitz.open(pdf_path)
+    full_text = ""
+    for page in doc:
+        # Try text layer first
+        text = page.get_text()
+        if not text.strip():
+            # fallback to OCR
+            pix = page.get_pixmap(dpi=300)
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            text = ocr_image(img)
+        full_text += "\n" + text
+    return full_text
 
-    # Example regex, adjust for your formats
-    inv_match = re.search(r"(Invoice\s*No[:\s]*)(\S+)", text, re.IGNORECASE)
-    if inv_match:
-        data["Invoice_Number"] = inv_match.group(2).strip()
+# -------------------------------
+# Extraction regex
+# -------------------------------
+def extract_invoice_number(text: str) -> str:
+    match = re.search(r"(Invoice\s*(No|Number)?[:\s]*)([A-Z0-9\-\/]+)", text, re.IGNORECASE)
+    return match.group(3).strip() if match else ""
 
-    gst_matches = re.findall(r"\b\d{2}[A-Z]{5}\d{4}[A-Z]{1}[A-Z\d]{1}[Z]{1}[A-Z\d]{1}\b", text)
-    if gst_matches:
-        if len(gst_matches) >= 1:
-            data["Seller_GST"] = gst_matches[0]
-        if len(gst_matches) >= 2:
-            data["Buyer_GST"] = gst_matches[1]
+def extract_gst_numbers(text: str) -> list:
+    # Loose regex to handle OCR errors
+    gst_matches = re.findall(r"\b\d{2}[A-Z0-9]{5}\d{4}[A-Z0-9]{1}Z[A-Z0-9]{1}\b", text, re.IGNORECASE)
+    return gst_matches
 
-    # Seller state code: first 2 digits of GST
-    if data["Seller_GST"]:
-        data["Seller_State_Code"] = data["Seller_GST"][:2]
+def extract_state_code_from_gst(gst: str) -> str:
+    return gst[:2] if gst else ""
 
-    # Seller state name (basic mapping, can expand)
-    state_codes = {
-        "01": "Jammu & Kashmir",
-        "02": "Himachal Pradesh",
-        "03": "Punjab",
-        "04": "Chandigarh",
-        "05": "Uttarakhand",
-        "06": "Haryana",
-        "07": "Delhi",
-        "08": "Rajasthan",
-        "09": "Uttar Pradesh",
-        "10": "Bihar",
-        # Add remaining as needed
-    }
-    code = data["Seller_State_Code"]
-    if code in state_codes:
-        data["Seller_State"] = state_codes[code]
-
-    return data
-
+# -------------------------------
+# Main processing
+# -------------------------------
 def process_pdf(pdf_path: str) -> dict:
-    """
-    Extract text from PDF and parse invoice data
-    """
-    print(f"[INFO] Processing PDF: {pdf_path}")
-    try:
-        doc = fitz.open(pdf_path)
-        full_text = ""
-        for page_num, page in enumerate(doc, start=1):
-            text = page.get_text()
-            if not text.strip():
-                # fallback: render page as image and OCR
-                pix = page.get_pixmap(dpi=300)
-                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                text = ocr_image(img)
-            full_text += "\n" + text
-        data = extract_invoice_data(full_text)
-        return data
-    except Exception as e:
-        print(f"[ERROR] Failed to process {pdf_path}: {e}")
-        return {}
+    text = extract_text_from_pdf(pdf_path)
 
-# -----------------------------
-# MAIN
-# -----------------------------
+    invoice_number = extract_invoice_number(text)
+    gst_numbers = extract_gst_numbers(text)
 
-def main():
-    print("[INFO] Auto-starting PDF processing...")
+    seller_gst = gst_numbers[0] if gst_numbers else ""
+    buyer_gst = gst_numbers[1] if len(gst_numbers) > 1 else ""
 
-    pdf_folder_path = Path(PDF_FOLDER)
-    pdf_files = sorted(pdf_folder_path.glob("*.pdf"))
+    seller_state_code = extract_state_code_from_gst(seller_gst)
+    seller_state = state_codes.get(seller_state_code, "")
 
-    if not pdf_files:
-        print(f"[WARN] No PDFs found in {PDF_FOLDER}")
-        return
+    data = {
+        "Invoice_Number": invoice_number,
+        "Seller_GST": seller_gst,
+        "Buyer_GST": buyer_gst,
+        "Seller_State_Code": seller_state_code,
+        "Seller_State": seller_state
+    }
 
-    results = []
+    return {"data": data, "status": "success"}
 
-    for pdf_file in pdf_files:
-        data = process_pdf(str(pdf_file))
-        data["FileName"] = pdf_file.name
-        results.append(data)
-
-    # Save results to JSON
-    timestamp = int(time.time())
-    output_file = os.path.join(OUTPUT_FOLDER, f"invoice_data_{timestamp}.json")
-    with open(output_file, "w", encoding="utf-8") as f:
-        json.dump(results, f, indent=4, ensure_ascii=False)
-
-    print(f"[INFO] Processing complete. Results saved to: {output_file}")
-    print(json.dumps(results, indent=4, ensure_ascii=False))
-
+# -------------------------------
+# Run all PDFs
+# -------------------------------
 if __name__ == "__main__":
-    main()
+    pdf_files = [f for f in os.listdir(PDF_FOLDER) if f.lower().endswith(".pdf")]
+    if not pdf_files:
+        print(json.dumps({"data": {}, "status": "no PDFs found"}))
+    else:
+        results = []
+        for pdf_file in pdf_files:
+            pdf_path = os.path.join(PDF_FOLDER, pdf_file)
+            print(f"Processing: {pdf_file}")
+            result = process_pdf(pdf_path)
+            results.append(result)
+        # Output all results as JSON
+        print(json.dumps(results, indent=2))
